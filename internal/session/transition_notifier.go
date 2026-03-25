@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -121,11 +122,21 @@ func (n *TransitionNotifier) NotifyTransition(event TransitionNotificationEvent)
 }
 
 // notifyWebhook sends a Slack-formatted notification to AGENT_DECK_NOTIFY_WEBHOOK_URL
-// if the environment variable is set. Fires on all non-dropped transitions.
+// if the environment variable is set. Only fires for sessions whose title matches
+// AGENT_DECK_NOTIFY_TITLE_PATTERN (regex). If the pattern env var is not set, fires for all.
 func (n *TransitionNotifier) notifyWebhook(event TransitionNotificationEvent) {
 	webhookURL := os.Getenv("AGENT_DECK_NOTIFY_WEBHOOK_URL")
 	if webhookURL == "" || event.DeliveryResult == transitionDeliveryDropped {
 		return
+	}
+
+	// Filter by title pattern if configured
+	pattern := os.Getenv("AGENT_DECK_NOTIFY_TITLE_PATTERN")
+	if pattern != "" {
+		matched, err := regexp.MatchString(pattern, event.ChildTitle)
+		if err != nil || !matched {
+			return
+		}
 	}
 
 	emoji := ":large_yellow_circle:"
