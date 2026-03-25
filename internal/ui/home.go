@@ -10050,6 +10050,18 @@ func (h *Home) renderPreviewPane(width, height int) string {
 	b.WriteString(groupBadge)
 	b.WriteString("\n")
 
+	// Parent session info
+	if selected.ParentSessionID != "" {
+		parentInst := h.getInstanceByID(selected.ParentSessionID)
+		if parentInst != nil {
+			parentStyle := lipgloss.NewStyle().Foreground(ColorPurple).Bold(true)
+			parentLabel := lipgloss.NewStyle().Foreground(ColorTextDim)
+			b.WriteString(parentLabel.Render("⬆ parent: "))
+			b.WriteString(parentStyle.Render(parentInst.Title))
+			b.WriteString("\n")
+		}
+	}
+
 	// Worktree info section (for sessions running in git worktrees)
 	if selected.IsWorktree() {
 		wtHeader := renderSectionDivider("Worktree", width-4)
