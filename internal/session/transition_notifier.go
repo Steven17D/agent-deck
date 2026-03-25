@@ -1,8 +1,10 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,9 +114,36 @@ func (n *TransitionNotifier) NotifyTransition(event TransitionNotificationEvent)
 	}
 
 	result := n.dispatch(event)
+	n.notifyWebhook(result)
 	n.markNotified(result)
 	n.logEvent(result)
 	return result
+}
+
+// notifyWebhook sends a Slack-formatted notification to AGENT_DECK_NOTIFY_WEBHOOK_URL
+// if the environment variable is set. Fires on all non-dropped transitions.
+func (n *TransitionNotifier) notifyWebhook(event TransitionNotificationEvent) {
+	webhookURL := os.Getenv("AGENT_DECK_NOTIFY_WEBHOOK_URL")
+	if webhookURL == "" || event.DeliveryResult == transitionDeliveryDropped {
+		return
+	}
+
+	emoji := ":large_yellow_circle:"
+	if event.ToStatus == "error" {
+		emoji = ":red_circle:"
+	} else if event.ToStatus == "idle" {
+		emoji = ":white_circle:"
+	}
+
+	text := fmt.Sprintf("%s *%s* is now `%s`", emoji, event.ChildTitle, event.ToStatus)
+	payload, _ := json.Marshal(map[string]string{"text": text})
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(webhookURL, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }
 
 func (n *TransitionNotifier) dispatch(event TransitionNotificationEvent) TransitionNotificationEvent {
