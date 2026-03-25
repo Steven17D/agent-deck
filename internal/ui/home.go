@@ -1094,6 +1094,28 @@ func (h *Home) sessionHasWindows(item session.Item) bool {
 	return len(tmux.GetCachedWindows(tmuxSess.Name)) >= 2
 }
 
+// sessionHasSubSessions returns true if the session is a parent with sub-sessions.
+func (h *Home) sessionHasSubSessions(sessionID string) bool {
+	for _, fi := range h.flatItems {
+		if fi.IsSubSession && fi.Session != nil && fi.Session.ParentSessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
+// isChildOfSessionSelected returns true if the currently selected item is a sub-session of the given parent.
+func (h *Home) isChildOfSessionSelected(parentID string) bool {
+	if h.cursor >= len(h.flatItems) {
+		return false
+	}
+	sel := h.flatItems[h.cursor]
+	if sel.Session == nil {
+		return false
+	}
+	return sel.IsSubSession && sel.Session.ParentSessionID == parentID
+}
+
 // moveCursorToSession moves the cursor to the flat item matching the given session ID.
 func (h *Home) moveCursorToSession(sessionID string) {
 	for i, fi := range h.flatItems {
@@ -9281,6 +9303,13 @@ func (h *Home) renderSessionItem(
 		titleStyle = SessionTitleDefault
 	}
 
+	// Parent session: bright highlight when one of its children is selected
+	if !item.IsSubSession && h.sessionHasSubSessions(inst.ID) {
+		if h.isChildOfSessionSelected(inst.ID) {
+			titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Reverse(true)
+		}
+	}
+
 	// Tool badge with brand-specific color
 	// Claude=orange, Gemini=purple, Codex=cyan, Aider=red
 	toolStyle := GetToolStyle(instTool)
@@ -9296,9 +9325,15 @@ func (h *Home) renderSessionItem(
 		// Tree connector also gets selection styling
 		treeStyle = TreeConnectorSelStyle
 		// Rebuild baseIndent with selection styling for sub-sessions
-		if item.IsSubSession && !item.ParentIsLastInGroup {
+		if item.IsSubSession {
 			groupIndent := strings.Repeat(treeEmpty, max(0, item.Level-2))
-			baseIndent = groupIndent + " " + treeStyle.Render("│")
+			if item.ParentIsLastInGroup {
+				baseIndent = groupIndent + " "
+			} else {
+				// Place ▶ where │ was, so it reads as ▶├─ instead of │▶├─
+				baseIndent = groupIndent
+				selectionPrefix = SessionSelectionPrefix.Render("▶")
+			}
 		}
 	}
 
