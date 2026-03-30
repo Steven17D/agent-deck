@@ -41,6 +41,9 @@ import (
 // Version is set by main.go for update checking
 var Version = "0.0.0"
 
+// Commit is the git commit hash, set by main.go at startup.
+var Commit string
+
 // SetVersion sets the current version for update checking
 func SetVersion(v string) {
 	Version = v
@@ -65,6 +68,19 @@ func (h *Home) isCreatingPlaceholder() bool {
 		return false
 	}
 	return h.flatItems[h.cursor].CreatingID != ""
+}
+
+// SetCommit sets the git commit hash for display in the UI.
+func SetCommit(c string) {
+	Commit = c
+}
+
+// DisplayVersion returns the version string with commit hash if available.
+func DisplayVersion() string {
+	if Commit != "" {
+		return Version + " (" + Commit + ")"
+	}
+	return Version
 }
 
 // Structured loggers for UI components
@@ -7971,7 +7987,7 @@ func (h *Home) View() string {
 	versionStyle := lipgloss.NewStyle().
 		Foreground(ColorComment).
 		Faint(true)
-	versionBadge := versionStyle.Render("v" + Version)
+	versionBadge := versionStyle.Render("v" + DisplayVersion())
 
 	// Fill remaining header space
 	headerLeft := lipgloss.JoinHorizontal(lipgloss.Left, logo, "  ", title, "  ", stats)
