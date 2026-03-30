@@ -112,6 +112,7 @@ func handleHookHandler() {
 	// Write cost event if this hook contains usage data
 	logCostDebug("hook event=%s instance=%s status=%s", payload.HookEventName, instanceID, status)
 	writeCostEvent(instanceID, data)
+
 }
 
 // writeHookStatus writes a hook status file atomically for one instance.
