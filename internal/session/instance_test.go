@@ -711,10 +711,11 @@ func TestInstance_UpdateClaudeSession_PreservesExistingID(t *testing.T) {
 	}
 }
 
-// TestSyncClaudeSessionFromDisk_PicksUpNewerSession verifies that when a newer
-// session file appears on disk (e.g., after /clear), syncClaudeSessionFromDisk
-// updates the instance's ClaudeSessionID.
-func TestSyncClaudeSessionFromDisk_PicksUpNewerSession(t *testing.T) {
+// TestSyncClaudeSessionFromDisk_Disabled_NoMutation verifies disk-scan sync
+// no longer mutates ClaudeSessionID, even when newer files exist on disk.
+func TestSyncClaudeSessionFromDisk_Disabled_NoMutation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	configDir := t.TempDir()
 	origConfigDir := os.Getenv("CLAUDE_CONFIG_DIR")
 	os.Setenv("CLAUDE_CONFIG_DIR", configDir)
@@ -756,14 +757,27 @@ func TestSyncClaudeSessionFromDisk_PicksUpNewerSession(t *testing.T) {
 	inst := NewInstanceWithTool("sync-test", projectPath, "claude")
 	inst.ClaudeSessionID = oldSessionID
 	inst.ClaudeDetectedAt = time.Now().Add(-1 * time.Minute)
+	originalDetectedAt := inst.ClaudeDetectedAt
 
 	inst.syncClaudeSessionFromDisk()
 
-	if inst.ClaudeSessionID != newSessionID {
-		t.Errorf("ClaudeSessionID = %q, want %q (newer session from disk)", inst.ClaudeSessionID, newSessionID)
+	if inst.ClaudeSessionID != oldSessionID {
+		t.Errorf("ClaudeSessionID = %q, want %q (disk scan must be non-authoritative)", inst.ClaudeSessionID, oldSessionID)
 	}
-	if inst.ClaudeDetectedAt.IsZero() {
-		t.Error("ClaudeDetectedAt should be set after sync")
+	if inst.ClaudeDetectedAt != originalDetectedAt {
+		t.Error("ClaudeDetectedAt should not change when disk scan is disabled")
+	}
+
+	logData, err := os.ReadFile(GetSessionIDLifecycleLogPath())
+	if err != nil {
+		t.Fatalf("read lifecycle log: %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, `"action":"scan_disabled"`) {
+		t.Fatalf("lifecycle log missing scan_disabled action: %s", logText)
+	}
+	if !strings.Contains(logText, `"instance_id":"`+inst.ID+`"`) {
+		t.Fatalf("lifecycle log missing instance id %q: %s", inst.ID, logText)
 	}
 }
 
@@ -809,7 +823,7 @@ func TestSyncClaudeSessionFromDisk_NoChangeWhenCurrent(t *testing.T) {
 }
 
 // TestSyncClaudeSessionFromDisk_IgnoresAgentFiles verifies that agent-*.jsonl files
-// are not picked up as the active session.
+// never affect the active session when disk scan is disabled.
 func TestSyncClaudeSessionFromDisk_IgnoresAgentFiles(t *testing.T) {
 	configDir := t.TempDir()
 	origConfigDir := os.Getenv("CLAUDE_CONFIG_DIR")
@@ -852,7 +866,7 @@ func TestSyncClaudeSessionFromDisk_IgnoresAgentFiles(t *testing.T) {
 	inst.syncClaudeSessionFromDisk()
 
 	if inst.ClaudeSessionID != realSession {
-		t.Errorf("ClaudeSessionID = %q, want %q (agent files should be ignored)", inst.ClaudeSessionID, realSession)
+		t.Errorf("ClaudeSessionID = %q, want %q (disk scan disabled)", inst.ClaudeSessionID, realSession)
 	}
 }
 
@@ -866,9 +880,7 @@ func TestSyncClaudeSessionFromDisk_SkipsNonClaude(t *testing.T) {
 	}
 }
 
-// TestSyncClaudeSessionFromDisk_RejectsZombie verifies that a real current session
-// is NOT replaced by a zombie candidate (file with no conversation data).
-func TestSyncClaudeSessionFromDisk_RejectsZombie(t *testing.T) {
+func TestSyncClaudeSessionFromDisk_NoLifecycleMutationForDifferentIDs(t *testing.T) {
 	configDir := t.TempDir()
 	origConfigDir := os.Getenv("CLAUDE_CONFIG_DIR")
 	os.Setenv("CLAUDE_CONFIG_DIR", configDir)
@@ -880,141 +892,34 @@ func TestSyncClaudeSessionFromDisk_RejectsZombie(t *testing.T) {
 		}
 	}()
 
-	projectPath := "/Users/test/zombie-reject-project"
-	projectDirName := ConvertToClaudeDirName(projectPath)
-	projectDir := filepath.Join(configDir, "projects", projectDirName)
+	projectPath := "/Users/test/lifecycle-no-mutation-project"
+	projectDir := filepath.Join(configDir, "projects", ConvertToClaudeDirName(projectPath))
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	realID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-	zombieID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	currentID := "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	candidateID := "dddddddd-dddd-dddd-dddd-dddddddddddd"
 
-	// Real session: has conversation data
-	realContent := `{"sessionId":"` + realID + `","type":"progress"}`
-	realPath := filepath.Join(projectDir, realID+".jsonl")
-	if err := os.WriteFile(realPath, []byte(realContent), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectDir, currentID+".jsonl"), []byte(`{"sessionId":"`+currentID+`"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(realPath, time.Now().Add(-30*time.Second), time.Now().Add(-30*time.Second)); err != nil {
+	if err := os.WriteFile(filepath.Join(projectDir, candidateID+".jsonl"), []byte(`{"sessionId":"`+candidateID+`"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Zombie session: newer modification time but no conversation data
-	zombiePath := filepath.Join(projectDir, zombieID+".jsonl")
-	if err := os.WriteFile(zombiePath, []byte(`{"type":"file-history-snapshot"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	inst := NewInstanceWithTool("zombie-reject-test", projectPath, "claude")
-	inst.ClaudeSessionID = realID
+	inst := NewInstanceWithTool("lifecycle-no-mutation", projectPath, "claude")
+	inst.ClaudeSessionID = currentID
 	inst.ClaudeDetectedAt = time.Now().Add(-1 * time.Minute)
+	originalDetectedAt := inst.ClaudeDetectedAt
 
 	inst.syncClaudeSessionFromDisk()
 
-	if inst.ClaudeSessionID != realID {
-		t.Errorf("ClaudeSessionID = %q, want %q (real session should NOT be replaced by zombie)", inst.ClaudeSessionID, realID)
+	if inst.ClaudeSessionID != currentID {
+		t.Errorf("ClaudeSessionID = %q, want %q", inst.ClaudeSessionID, currentID)
 	}
-}
-
-// TestSyncClaudeSessionFromDisk_AcceptsRealOverZombie verifies that a zombie current
-// session IS replaced by a real candidate (upgrade from zombie to real).
-func TestSyncClaudeSessionFromDisk_AcceptsRealOverZombie(t *testing.T) {
-	configDir := t.TempDir()
-	origConfigDir := os.Getenv("CLAUDE_CONFIG_DIR")
-	os.Setenv("CLAUDE_CONFIG_DIR", configDir)
-	defer func() {
-		if origConfigDir != "" {
-			os.Setenv("CLAUDE_CONFIG_DIR", origConfigDir)
-		} else {
-			os.Unsetenv("CLAUDE_CONFIG_DIR")
-		}
-	}()
-
-	projectPath := "/Users/test/zombie-upgrade-project"
-	projectDirName := ConvertToClaudeDirName(projectPath)
-	projectDir := filepath.Join(configDir, "projects", projectDirName)
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	zombieID := "cccccccc-cccc-cccc-cccc-cccccccccccc"
-	realID := "dddddddd-dddd-dddd-dddd-dddddddddddd"
-
-	// Zombie current: no conversation data
-	zombiePath := filepath.Join(projectDir, zombieID+".jsonl")
-	if err := os.WriteFile(zombiePath, []byte(`{"type":"file-history-snapshot"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(zombiePath, time.Now().Add(-30*time.Second), time.Now().Add(-30*time.Second)); err != nil {
-		t.Fatal(err)
-	}
-
-	// Real candidate: has conversation data, newer
-	realContent := `{"sessionId":"` + realID + `","type":"progress"}`
-	realPath := filepath.Join(projectDir, realID+".jsonl")
-	if err := os.WriteFile(realPath, []byte(realContent), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	inst := NewInstanceWithTool("zombie-upgrade-test", projectPath, "claude")
-	inst.ClaudeSessionID = zombieID
-	inst.ClaudeDetectedAt = time.Now().Add(-1 * time.Minute)
-
-	inst.syncClaudeSessionFromDisk()
-
-	if inst.ClaudeSessionID != realID {
-		t.Errorf("ClaudeSessionID = %q, want %q (zombie should be upgraded to real session)", inst.ClaudeSessionID, realID)
-	}
-}
-
-// TestSyncClaudeSessionFromDisk_RejectsBothZombies verifies that when both the
-// current and candidate sessions are zombies, the current is kept (no pointless swap).
-func TestSyncClaudeSessionFromDisk_RejectsBothZombies(t *testing.T) {
-	configDir := t.TempDir()
-	origConfigDir := os.Getenv("CLAUDE_CONFIG_DIR")
-	os.Setenv("CLAUDE_CONFIG_DIR", configDir)
-	defer func() {
-		if origConfigDir != "" {
-			os.Setenv("CLAUDE_CONFIG_DIR", origConfigDir)
-		} else {
-			os.Unsetenv("CLAUDE_CONFIG_DIR")
-		}
-	}()
-
-	projectPath := "/Users/test/both-zombies-project"
-	projectDirName := ConvertToClaudeDirName(projectPath)
-	projectDir := filepath.Join(configDir, "projects", projectDirName)
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	zombieA := "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
-	zombieB := "ffffffff-ffff-ffff-ffff-ffffffffffff"
-
-	// Zombie A (current): no conversation data
-	zombieAPath := filepath.Join(projectDir, zombieA+".jsonl")
-	if err := os.WriteFile(zombieAPath, []byte(`{"type":"file-history-snapshot"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(zombieAPath, time.Now().Add(-30*time.Second), time.Now().Add(-30*time.Second)); err != nil {
-		t.Fatal(err)
-	}
-
-	// Zombie B (candidate): also no conversation data, but newer
-	zombieBPath := filepath.Join(projectDir, zombieB+".jsonl")
-	if err := os.WriteFile(zombieBPath, []byte(`{"type":"file-history-snapshot"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	inst := NewInstanceWithTool("both-zombies-test", projectPath, "claude")
-	inst.ClaudeSessionID = zombieA
-	inst.ClaudeDetectedAt = time.Now().Add(-1 * time.Minute)
-
-	inst.syncClaudeSessionFromDisk()
-
-	if inst.ClaudeSessionID != zombieA {
-		t.Errorf("ClaudeSessionID = %q, want %q (should not swap between zombies)", inst.ClaudeSessionID, zombieA)
+	if inst.ClaudeDetectedAt != originalDetectedAt {
+		t.Error("ClaudeDetectedAt should not change when disk scan is disabled")
 	}
 }
 
@@ -2590,6 +2495,8 @@ func TestInstance_ConsumeCodexRestartWarning_Concurrent(t *testing.T) {
 
 // TestInstance_UpdateHookStatus tests the UpdateHookStatus method.
 func TestInstance_UpdateHookStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	inst := NewInstanceWithTool("hook-update-test", "/tmp/test", "claude")
 
 	// Update with hook status
@@ -2607,6 +2514,15 @@ func TestInstance_UpdateHookStatus(t *testing.T) {
 	}
 	if inst.ClaudeSessionID != "hook-session-123" {
 		t.Errorf("ClaudeSessionID = %q, want hook-session-123", inst.ClaudeSessionID)
+	}
+
+	logData, err := os.ReadFile(GetSessionIDLifecycleLogPath())
+	if err != nil {
+		t.Fatalf("read lifecycle log: %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, `"action":"bind"`) || !strings.Contains(logText, `"source":"hook_payload"`) {
+		t.Fatalf("lifecycle log missing hook bind event: %s", logText)
 	}
 }
 
