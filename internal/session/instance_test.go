@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -711,6 +712,104 @@ func TestInstance_UpdateClaudeSession_PreservesExistingID(t *testing.T) {
 	}
 }
 
+func TestInstance_UpdateClaudeSession_RejectZombie_NoFalseRebindEvent(t *testing.T) {
+	skipIfNoTmuxServer(t)
+	t.Setenv("HOME", t.TempDir())
+
+	configDir := t.TempDir()
+	origConfigDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	os.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	defer func() {
+		if origConfigDir != "" {
+			os.Setenv("CLAUDE_CONFIG_DIR", origConfigDir)
+		} else {
+			os.Unsetenv("CLAUDE_CONFIG_DIR")
+		}
+	}()
+
+	projectPath := "/tmp/claude-zombie-reject"
+	projectDir := filepath.Join(configDir, "projects", ConvertToClaudeDirName(projectPath))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+
+	currentID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	candidateID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+	// Current ID has conversation data.
+	if err := os.WriteFile(
+		filepath.Join(projectDir, currentID+".jsonl"),
+		[]byte(`{"sessionId":"`+currentID+`","type":"user"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write current session: %v", err)
+	}
+	// Candidate exists but has no conversation data (zombie).
+	if err := os.WriteFile(
+		filepath.Join(projectDir, candidateID+".jsonl"),
+		[]byte(`{"type":"file-history-snapshot"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write candidate session: %v", err)
+	}
+
+	inst := NewInstanceWithTool("reject-zombie-test", projectPath, "claude")
+	inst.ClaudeSessionID = currentID
+	inst.ClaudeDetectedAt = time.Now().Add(-1 * time.Minute)
+
+	if err := inst.Start(); err != nil {
+		t.Fatalf("start instance: %v", err)
+	}
+	defer func() { _ = inst.Kill() }()
+
+	if err := inst.tmuxSession.SetEnvironment("CLAUDE_SESSION_ID", candidateID); err != nil {
+		t.Fatalf("set tmux env: %v", err)
+	}
+
+	inst.UpdateClaudeSession(nil)
+
+	if inst.ClaudeSessionID != currentID {
+		t.Fatalf("ClaudeSessionID = %q, want %q", inst.ClaudeSessionID, currentID)
+	}
+
+	logData, err := os.ReadFile(GetSessionIDLifecycleLogPath())
+	if err != nil {
+		t.Fatalf("read lifecycle log: %v", err)
+	}
+
+	type lifecycle struct {
+		Action    string `json:"action"`
+		Source    string `json:"source"`
+		OldID     string `json:"old_id"`
+		NewID     string `json:"new_id"`
+		Candidate string `json:"candidate"`
+	}
+	var sawReject bool
+	var sawFalseBind bool
+	for _, line := range strings.Split(strings.TrimSpace(string(logData)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var ev lifecycle
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unmarshal lifecycle event: %v", err)
+		}
+		if ev.Action == "reject" && ev.Source == "tmux_env" && ev.Candidate == candidateID {
+			sawReject = true
+		}
+		if (ev.Action == "bind" || ev.Action == "rebind") && ev.Source == "tmux_env" && ev.OldID == currentID &&
+			ev.NewID == currentID {
+			sawFalseBind = true
+		}
+	}
+	if !sawReject {
+		t.Fatal("expected reject event for zombie candidate")
+	}
+	if sawFalseBind {
+		t.Fatal("found false bind/rebind event where old_id == new_id after rejection")
+	}
+}
+
 // TestSyncClaudeSessionFromDisk_Disabled_NoMutation verifies disk-scan sync
 // no longer mutates ClaudeSessionID, even when newer files exist on disk.
 func TestSyncClaudeSessionFromDisk_Disabled_NoMutation(t *testing.T) {
@@ -1083,6 +1182,34 @@ func TestInstance_Restart_InterruptsAndResumes(t *testing.T) {
 	// Verify the session still exists after restart
 	if !inst.tmuxSession.Exists() {
 		t.Error("tmux session should still exist after restart")
+	}
+}
+
+func TestInstance_Restart_CodexRefreshesSessionIDFromTmuxWhenStale(t *testing.T) {
+	skipIfNoTmuxServer(t)
+
+	inst := NewInstanceWithTool("restart-codex-refresh-test", "/tmp", "codex")
+	inst.Command = "codex"
+	inst.CodexSessionID = "old-codex-session-id"
+	inst.CodexDetectedAt = time.Now().Add(-10 * time.Minute)
+
+	if err := inst.Start(); err != nil {
+		t.Fatalf("Failed to start initial session: %v", err)
+	}
+	defer func() { _ = inst.Kill() }()
+
+	newID := "new-codex-session-id"
+	if err := inst.tmuxSession.SetEnvironment("CODEX_SESSION_ID", newID); err != nil {
+		t.Fatalf("set CODEX_SESSION_ID: %v", err)
+	}
+
+	inst.Status = StatusRunning
+	if err := inst.Restart(); err != nil {
+		t.Fatalf("Restart failed: %v", err)
+	}
+
+	if inst.CodexSessionID != newID {
+		t.Fatalf("CodexSessionID = %q, want %q (should refresh from tmux env before restart)", inst.CodexSessionID, newID)
 	}
 }
 

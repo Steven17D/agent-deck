@@ -2494,6 +2494,7 @@ func (i *Instance) UpdateClaudeSession(excludeIDs map[string]bool) {
 	// Read from tmux environment (set by capture-resume pattern)
 	if sessionID := i.GetSessionIDFromTmux(); sessionID != "" {
 		if i.ClaudeSessionID != sessionID {
+			rejected := false
 			// Quality gate: don't adopt a zombie ID from tmux env when current has real data
 			if i.ClaudeSessionID != "" {
 				currentHasData := sessionHasConversationData(i.ClaudeSessionID, i.ProjectPath)
@@ -2514,21 +2515,24 @@ func (i *Instance) UpdateClaudeSession(excludeIDs map[string]bool) {
 						Reason:     "tmux_env_has_zombie_id",
 					})
 					// Don't adopt the zombie; skip the update but still refresh prompt below
+					rejected = true
 					sessionID = i.ClaudeSessionID
 				}
 			}
-			action := "bind"
-			if i.ClaudeSessionID != "" {
-				action = "rebind"
+			if !rejected {
+				action := "bind"
+				if i.ClaudeSessionID != "" {
+					action = "rebind"
+				}
+				_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+					InstanceID: i.ID,
+					Tool:       i.Tool,
+					Action:     action,
+					Source:     "tmux_env",
+					OldID:      i.ClaudeSessionID,
+					NewID:      sessionID,
+				})
 			}
-			_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
-				InstanceID: i.ID,
-				Tool:       i.Tool,
-				Action:     action,
-				Source:     "tmux_env",
-				OldID:      i.ClaudeSessionID,
-				NewID:      sessionID,
-			})
 			i.ClaudeSessionID = sessionID
 		}
 		i.ClaudeDetectedAt = time.Now()
@@ -3870,12 +3874,9 @@ func (i *Instance) Restart() error {
 		return nil
 	}
 
-	// For Codex: try to update session ID, but only if we don't already have one.
-	// When we already have a known session ID (from the database), trust it —
-	// the disk scan can return a wrong ID when multiple instances share the same
-	// project_path. The process probe is authoritative but only works when the
-	// process is running, which it isn't during a restart.
-	if i.Tool == "codex" && i.CodexSessionID == "" {
+	// For Codex: refresh session ID before restart even when a stale ID is already
+	// present in memory. tmux env is authoritative and can rotate (e.g. /new).
+	if i.Tool == "codex" {
 		i.mu.Lock()
 		i.pendingCodexRestartWarning = ""
 		i.mu.Unlock()
