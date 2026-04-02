@@ -9254,8 +9254,9 @@ func (h *Home) renderSessionItem(
 	// Tree connector: └─ for last item, ├─ for others
 	treeConnector := treeBranch
 	if item.IsSubSession {
-		// Sub-session uses its own last-in-group logic
-		if item.IsLastSubSession {
+		// Sub-session rows should render an elbow when they are the final visible
+		// child. IsLastInGroup is a defensive fallback for stale sub-session flags.
+		if item.IsLastSubSession || item.IsLastInGroup {
 			treeConnector = subLast
 		} else {
 			treeConnector = subBranch
@@ -9324,16 +9325,12 @@ func (h *Home) renderSessionItem(
 		status = statusStyle.Render(statusIcon)
 		// Tree connector also gets selection styling
 		treeStyle = TreeConnectorSelStyle
-		// Rebuild baseIndent with selection styling for sub-sessions
+		// Rebuild indent so selected sub-session rows render as "▶ ├─/└─"
+		// instead of squeezing the arrow between tree connectors.
 		if item.IsSubSession {
 			groupIndent := strings.Repeat(treeEmpty, max(0, item.Level-2))
-			if item.ParentIsLastInGroup {
-				baseIndent = groupIndent + " "
-			} else {
-				// Place ▶ where │ was, so it reads as ▶├─ instead of │▶├─
-				baseIndent = groupIndent
-				selectionPrefix = SessionSelectionPrefix.Render("▶")
-			}
+			baseIndent = groupIndent + SessionSelectionPrefix.Render("▶ ")
+			selectionPrefix = ""
 		}
 	}
 

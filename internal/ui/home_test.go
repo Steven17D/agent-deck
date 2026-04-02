@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +157,42 @@ func assertViewWithinBounds(t *testing.T, view string, width, height int, contex
 		if got := lipgloss.Width(line); got > width {
 			t.Fatalf("%s: line %d width = %d, want <= %d\nline=%q", context, i, got, width, line)
 		}
+	}
+}
+
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func stripANSIEscapeCodes(s string) string {
+	return ansiEscapePattern.ReplaceAllString(s, "")
+}
+
+func TestRenderSessionItem_SelectedLastSubSessionUsesElbowAndAlignedArrow(t *testing.T) {
+	home := NewHome()
+	child := session.NewInstanceWithTool("child-task", "/tmp/child-task", "claude")
+
+	item := session.Item{
+		Type:                session.ItemTypeSession,
+		Session:             child,
+		Level:               2,
+		IsSubSession:        true,
+		IsLastSubSession:    true,
+		IsLastInGroup:       true,
+		ParentIsLastInGroup: true,
+	}
+
+	snapshot := map[string]sessionRenderState{
+		child.ID: {status: session.StatusWaiting, tool: "claude"},
+	}
+
+	var b strings.Builder
+	home.renderSessionItem(&b, item, true, snapshot)
+	row := strings.TrimSuffix(stripANSIEscapeCodes(b.String()), "\n")
+
+	if !strings.Contains(row, "▶ └─") {
+		t.Fatalf("selected last sub-session row should contain aligned elbow prefix '▶ └─', got: %q", row)
+	}
+	if strings.Contains(row, "│▶") {
+		t.Fatalf("selected sub-session row should not squeeze arrow between tree connectors, got: %q", row)
 	}
 }
 
