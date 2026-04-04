@@ -724,8 +724,9 @@ func handleGroupMove(profile string, args []string) {
 	// Check if target group exists (unless moving to default)
 	if targetGroupPath != session.DefaultGroupPath && targetGroupPath != "" {
 		if _, exists := groupTree.Groups[targetGroupPath]; !exists {
-			// Create the group
-			groupTree.CreateGroup(targetGroupPath)
+			// Create the group and update targetGroupPath to the normalized path
+			created := groupTree.CreateGroup(targetGroupPath)
+			targetGroupPath = created.Path
 		}
 	}
 

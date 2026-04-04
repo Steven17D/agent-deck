@@ -1,9 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"regexp"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -112,9 +115,46 @@ func (n *TransitionNotifier) NotifyTransition(event TransitionNotificationEvent)
 	}
 
 	result := n.dispatch(event)
+	n.notifyWebhook(result)
 	n.markNotified(result)
 	n.logEvent(result)
 	return result
+}
+
+// notifyWebhook sends a Slack-formatted notification to AGENT_DECK_NOTIFY_WEBHOOK_URL
+// if the environment variable is set. Only fires for sessions whose title matches
+// AGENT_DECK_NOTIFY_TITLE_PATTERN (regex). If the pattern env var is not set, fires for all.
+func (n *TransitionNotifier) notifyWebhook(event TransitionNotificationEvent) {
+	webhookURL := os.Getenv("AGENT_DECK_NOTIFY_WEBHOOK_URL")
+	if webhookURL == "" || event.DeliveryResult == transitionDeliveryDropped {
+		return
+	}
+
+	// Filter by title pattern if configured
+	pattern := os.Getenv("AGENT_DECK_NOTIFY_TITLE_PATTERN")
+	if pattern != "" {
+		matched, err := regexp.MatchString(pattern, event.ChildTitle)
+		if err != nil || !matched {
+			return
+		}
+	}
+
+	emoji := ":large_yellow_circle:"
+	if event.ToStatus == "error" {
+		emoji = ":red_circle:"
+	} else if event.ToStatus == "idle" {
+		emoji = ":white_circle:"
+	}
+
+	text := fmt.Sprintf("%s *%s* is now `%s`", emoji, event.ChildTitle, event.ToStatus)
+	payload, _ := json.Marshal(map[string]string{"text": text})
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(webhookURL, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }
 
 func (n *TransitionNotifier) dispatch(event TransitionNotificationEvent) TransitionNotificationEvent {
