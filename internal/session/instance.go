@@ -2630,11 +2630,15 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 				_ = i.tmuxSession.SetEnvironment("CLAUDE_SESSION_ID", sessionID)
 			}
 		} else {
+			rejectSource := "hook_payload"
+			if strings.TrimSpace(status.SessionID) == "" {
+				rejectSource = "hook_anchor"
+			}
 			_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
 				InstanceID: i.ID,
 				Tool:       i.Tool,
 				Action:     "reject",
-				Source:     "hook_payload",
+				Source:     rejectSource,
 				OldID:      i.ClaudeSessionID,
 				Candidate:  sessionID,
 				Reason:     "candidate_has_no_conversation_data",
@@ -2711,11 +2715,15 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 				_ = i.tmuxSession.SetEnvironment("GEMINI_SESSION_ID", sessionID)
 			}
 		} else {
+			rejectSource := "hook_payload"
+			if strings.TrimSpace(status.SessionID) == "" {
+				rejectSource = "hook_anchor"
+			}
 			_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
 				InstanceID: i.ID,
 				Tool:       i.Tool,
 				Action:     "reject",
-				Source:     "hook_payload",
+				Source:     rejectSource,
 				OldID:      i.GeminiSessionID,
 				Candidate:  sessionID,
 				Reason:     "candidate_has_no_conversation_data",
