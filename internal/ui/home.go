@@ -1094,16 +1094,6 @@ func (h *Home) sessionHasWindows(item session.Item) bool {
 	return len(tmux.GetCachedWindows(tmuxSess.Name)) >= 2
 }
 
-// sessionHasSubSessions returns true if the session is a parent with sub-sessions.
-func (h *Home) sessionHasSubSessions(sessionID string) bool {
-	for _, fi := range h.flatItems {
-		if fi.IsSubSession && fi.Session != nil && fi.Session.ParentSessionID == sessionID {
-			return true
-		}
-	}
-	return false
-}
-
 // isChildOfSessionSelected returns true if the currently selected item is a sub-session of the given parent.
 func (h *Home) isChildOfSessionSelected(parentID string) bool {
 	if h.cursor >= len(h.flatItems) {
@@ -9001,6 +8991,15 @@ func (h *Home) renderSessionList(width, height int) string {
 
 	snapshot := h.getSessionRenderSnapshot()
 	groupStats := h.buildGroupRenderStats(snapshot)
+
+	// Precompute which session IDs have sub-sessions to avoid O(n²) scan in renderSessionItem.
+	hasSubSessions := make(map[string]bool)
+	for _, fi := range h.flatItems {
+		if fi.IsSubSession && fi.Session != nil && fi.Session.ParentSessionID != "" {
+			hasSubSessions[fi.Session.ParentSessionID] = true
+		}
+	}
+
 	var jumpHints []string
 	if h.jumpMode {
 		jumpHints = generateJumpHints(len(h.flatItems))
@@ -9011,7 +9010,7 @@ func (h *Home) renderSessionList(width, height int) string {
 		if h.jumpMode && i < len(jumpHints) {
 			// Render item to temp buffer, then overlay hint badge at name position
 			var itemBuf strings.Builder
-			h.renderItem(&itemBuf, item, i == h.cursor, i, groupStats, snapshot)
+			h.renderItem(&itemBuf, item, i == h.cursor, i, groupStats, snapshot, hasSubSessions)
 			raw := itemBuf.String()
 			hint := jumpHints[i]
 			isMatch := h.jumpBuffer == "" || strings.HasPrefix(hint, h.jumpBuffer)
@@ -9031,7 +9030,7 @@ func (h *Home) renderSessionList(width, height int) string {
 				b.WriteString(raw)
 			}
 		} else {
-			h.renderItem(&b, item, i == h.cursor, i, groupStats, snapshot)
+			h.renderItem(&b, item, i == h.cursor, i, groupStats, snapshot, hasSubSessions)
 		}
 		visibleCount++
 	}
@@ -9109,12 +9108,13 @@ func (h *Home) renderItem(
 	itemIndex int,
 	groupStats map[string]groupRenderStats,
 	snapshot map[string]sessionRenderState,
+	hasSubSessions map[string]bool,
 ) {
 	switch item.Type {
 	case session.ItemTypeGroup:
 		h.renderGroupItem(b, item, selected, itemIndex, groupStats)
 	case session.ItemTypeSession:
-		h.renderSessionItem(b, item, selected, snapshot)
+		h.renderSessionItem(b, item, selected, snapshot, hasSubSessions)
 	case session.ItemTypeWindow:
 		h.renderWindowItem(b, item, selected)
 	case session.ItemTypeRemoteGroup:
@@ -9216,6 +9216,7 @@ func (h *Home) renderSessionItem(
 	item session.Item,
 	selected bool,
 	snapshot map[string]sessionRenderState,
+	hasSubSessions map[string]bool,
 ) {
 	inst := item.Session
 
@@ -9305,7 +9306,7 @@ func (h *Home) renderSessionItem(
 	}
 
 	// Parent session: bright highlight when one of its children is selected
-	if !item.IsSubSession && h.sessionHasSubSessions(inst.ID) {
+	if !item.IsSubSession && hasSubSessions[inst.ID] {
 		if h.isChildOfSessionSelected(inst.ID) {
 			titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Reverse(true)
 		}

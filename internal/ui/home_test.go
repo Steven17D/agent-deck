@@ -185,7 +185,7 @@ func TestRenderSessionItem_SelectedLastSubSessionUsesElbowAndAlignedArrow(t *tes
 	}
 
 	var b strings.Builder
-	home.renderSessionItem(&b, item, true, snapshot)
+	home.renderSessionItem(&b, item, true, snapshot, map[string]bool{})
 	row := strings.TrimSuffix(stripANSIEscapeCodes(b.String()), "\n")
 
 	if !strings.Contains(row, "▶ └─") {
