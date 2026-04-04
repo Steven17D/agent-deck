@@ -743,8 +743,9 @@ func handleGroupMove(profile string, args []string) {
 			}
 		}
 		if !matched {
-			// No existing group found - use the name as provided (preserve case)
-			groupTree.CreateGroup(targetGroupPath)
+			// No existing group found - CreateGroup normalizes the path
+			created := groupTree.CreateGroup(targetGroupPath)
+			targetGroupPath = created.Path
 		}
 	}
 
