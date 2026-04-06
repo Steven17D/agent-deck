@@ -157,16 +157,18 @@ const doubleClickThreshold = 500 * time.Millisecond
 
 // Layout mode breakpoints for responsive design
 const (
-	layoutBreakpointSingle  = 50 // Below: single column, no preview
-	layoutBreakpointStacked = 80 // Below: stacked layout (list above preview)
-	// At or above 80: dual column (current side-by-side layout)
+	layoutBreakpointSingle  = 50  // Below: single column, no preview
+	layoutBreakpointStacked = 80  // Below: stacked layout (list above preview)
+	layoutBreakpointTriple  = 140 // At or above: three-column (sessions + preview + workflow)
+	// Between 80-139: dual column (current side-by-side layout)
 )
 
 // Layout mode names
 const (
 	LayoutModeSingle  = "single"  // <50 cols: list only
 	LayoutModeStacked = "stacked" // 50-79 cols: vertical stack
-	LayoutModeDual    = "dual"    // 80+ cols: side-by-side
+	LayoutModeDual    = "dual"    // 80-139 cols: side-by-side
+	LayoutModeTriple  = "triple"  // 140+ cols: sessions + preview + workflow
 )
 
 // PreviewMode defines what to show in the preview pane
@@ -223,6 +225,9 @@ type Home struct {
 	setupWizard          *SetupWizard          // For first-run setup
 	settingsPanel        *SettingsPanel        // For editing settings
 	analyticsPanel       *AnalyticsPanel       // For displaying session analytics
+	workflowPanel        *WorkflowPanel        // For displaying workflow graph + artifacts
+	workflowWatcher      *WorkflowWatcher      // Polls workflow state file
+	showWorkflowPanel    bool                  // Toggle for workflow panel visibility
 	geminiModelDialog    *GeminiModelDialog    // For selecting Gemini model
 	sessionPickerDialog  *SessionPickerDialog  // For sending output to another session
 	worktreeFinishDialog *WorktreeFinishDialog // For finishing worktree sessions (merge + cleanup)
@@ -512,6 +517,8 @@ func (h *Home) getLayoutMode() string {
 		return LayoutModeSingle
 	case h.width < layoutBreakpointStacked:
 		return LayoutModeStacked
+	case h.width >= layoutBreakpointTriple && h.showWorkflowPanel:
+		return LayoutModeTriple
 	default:
 		return LayoutModeDual
 	}
@@ -714,6 +721,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		setupWizard:          NewSetupWizard(),
 		settingsPanel:        NewSettingsPanel(),
 		analyticsPanel:       NewAnalyticsPanel(),
+		workflowPanel:        NewWorkflowPanel(),
 		geminiModelDialog:    NewGeminiModelDialog(),
 		sessionPickerDialog:  NewSessionPickerDialog(),
 		worktreeFinishDialog: NewWorktreeFinishDialog(),
@@ -900,6 +908,10 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 			watcher.Start()
 		}
 	}
+
+	// Initialize workflow watcher
+	h.workflowWatcher = NewWorkflowWatcher(h.profile)
+	h.workflowWatcher.Start()
 
 	// Hook-based status detection (Claude Code lifecycle hooks)
 	userConfig, _ := session.LoadUserConfig()
@@ -4793,6 +4805,13 @@ func (h *Home) hasModalVisible() bool {
 func (h *Home) markNavigationAndFetchPreview() tea.Cmd {
 	h.lastNavigationTime = time.Now()
 	h.isNavigating = true
+	// Update workflow watcher to track current session
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+		item := h.flatItems[h.cursor]
+		if item.Session != nil {
+			h.workflowWatcher.SetSession(item.Session.ID)
+		}
+	}
 	return h.fetchSelectedPreview()
 }
 
@@ -5636,6 +5655,18 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.previewMode = (h.previewMode + 1) % 3
 		return h, nil
 
+	case "V", "shift+v":
+		// Toggle workflow panel
+		h.showWorkflowPanel = !h.showWorkflowPanel
+		// Ensure watcher tracks current session
+		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+			item := h.flatItems[h.cursor]
+			if item.Session != nil {
+				h.workflowWatcher.SetSession(item.Session.ID)
+			}
+		}
+		return h, nil
+
 	case "y":
 		// Toggle YOLO mode for Gemini or Codex sessions (requires restart)
 		if h.cursor < len(h.flatItems) {
@@ -6074,6 +6105,10 @@ func (h *Home) performFinalShutdown(shutdownPool bool) tea.Cmd {
 		// Close storage watcher
 		if h.storageWatcher != nil {
 			h.storageWatcher.Close()
+		}
+		// Close workflow watcher
+		if h.workflowWatcher != nil {
+			h.workflowWatcher.Close()
 		}
 		// Close theme watcher
 		h.stopThemeWatcher()
@@ -8084,6 +8119,8 @@ func (h *Home) View() string {
 		mainContent = h.renderSingleColumnLayout(contentHeight)
 	case LayoutModeStacked:
 		mainContent = h.renderStackedLayout(contentHeight)
+	case LayoutModeTriple:
+		mainContent = h.renderTripleColumnLayout(contentHeight)
 	default: // LayoutModeDual
 		mainContent = h.renderDualColumnLayout(contentHeight)
 	}
@@ -8574,9 +8611,23 @@ func (h *Home) renderDualColumnLayout(contentHeight int) string {
 	leftContent = ensureExactHeight(leftContent, panelContentHeight)
 	leftPanel := leftTitle + "\n" + leftContent
 
-	// Build right panel (preview) with styled title
-	rightTitle := h.renderPanelTitle("PREVIEW", rightWidth)
-	rightContent := h.renderPreviewPane(rightWidth, panelContentHeight)
+	// Build right panel (preview or workflow, depending on toggle)
+	var rightTitle, rightContent string
+	if h.showWorkflowPanel {
+		// Sync watcher to current cursor selection
+		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+			if item := h.flatItems[h.cursor]; item.Session != nil {
+				h.workflowWatcher.SetSession(item.Session.ID)
+			}
+		}
+		rightTitle = h.renderPanelTitle("WORKFLOW", rightWidth)
+		h.workflowPanel.SetSize(rightWidth, panelContentHeight)
+		h.workflowPanel.SetState(h.workflowWatcher.State())
+		rightContent = h.workflowPanel.View()
+	} else {
+		rightTitle = h.renderPanelTitle("PREVIEW", rightWidth)
+		rightContent = h.renderPreviewPane(rightWidth, panelContentHeight)
+	}
 	// CRITICAL: Ensure right content has exactly panelContentHeight lines
 	rightContent = ensureExactHeight(rightContent, panelContentHeight)
 	rightPanel := rightTitle + "\n" + rightContent
@@ -8610,6 +8661,67 @@ func (h *Home) renderDualColumnLayout(contentHeight int) string {
 
 	b.WriteString(mainContent)
 
+	return b.String()
+}
+
+// renderTripleColumnLayout renders sessions + preview + workflow panel for wide terminals (140+ cols)
+func (h *Home) renderTripleColumnLayout(contentHeight int) string {
+	var b strings.Builder
+
+	// Calculate panel widths: 25% left, 50% center, 25% right
+	leftWidth := int(float64(h.width) * 0.25)
+	rightWidth := int(float64(h.width) * 0.25)
+	centerWidth := h.width - leftWidth - rightWidth - 6 // -6 for two separators (3 each)
+
+	panelTitleLines := 2
+	panelContentHeight := contentHeight - panelTitleLines
+
+	// Build left panel (session list)
+	leftTitle := h.renderPanelTitle("SESSIONS", leftWidth)
+	leftContent := h.renderSessionList(leftWidth, panelContentHeight)
+	leftContent = ensureExactHeight(leftContent, panelContentHeight)
+	leftPanel := leftTitle + "\n" + leftContent
+
+	// Build center panel (preview)
+	centerTitle := h.renderPanelTitle("PREVIEW", centerWidth)
+	centerContent := h.renderPreviewPane(centerWidth, panelContentHeight)
+	centerContent = ensureExactHeight(centerContent, panelContentHeight)
+	centerPanel := centerTitle + "\n" + centerContent
+
+	// Build right panel (workflow)
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+		if item := h.flatItems[h.cursor]; item.Session != nil {
+			h.workflowWatcher.SetSession(item.Session.ID)
+		}
+	}
+	rightTitle := h.renderPanelTitle("WORKFLOW", rightWidth)
+	h.workflowPanel.SetSize(rightWidth, panelContentHeight)
+	h.workflowPanel.SetState(h.workflowWatcher.State())
+	rightContent := h.workflowPanel.View()
+	rightContent = ensureExactHeight(rightContent, panelContentHeight)
+	rightPanel := rightTitle + "\n" + rightContent
+
+	// Build separators
+	separatorStyle := lipgloss.NewStyle().Foreground(ColorBorder)
+	separatorLines := make([]string, contentHeight)
+	for i := range separatorLines {
+		separatorLines[i] = separatorStyle.Render(" │ ")
+	}
+	separator := strings.Join(separatorLines, "\n")
+
+	// Ensure exact dimensions
+	leftPanel = ensureExactHeight(leftPanel, contentHeight)
+	centerPanel = ensureExactHeight(centerPanel, contentHeight)
+	rightPanel = ensureExactHeight(rightPanel, contentHeight)
+	leftPanel = ensureExactWidth(leftPanel, leftWidth)
+	centerPanel = ensureExactWidth(centerPanel, centerWidth)
+	rightPanel = ensureExactWidth(rightPanel, rightWidth)
+
+	// Join all panels
+	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, separator, centerPanel, separator, rightPanel)
+	mainContent = lipgloss.NewStyle().MaxWidth(h.width).Render(mainContent)
+
+	b.WriteString(mainContent)
 	return b.String()
 }
 

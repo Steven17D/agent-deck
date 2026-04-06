@@ -572,6 +572,12 @@ type ClaudeSettings struct {
 	// for instant, deterministic status updates instead of polling tmux content.
 	// Default: true (nil = use default true, set false to disable)
 	HooksEnabled *bool `toml:"hooks_enabled"`
+
+	// WorkflowHookEnabled enables the workflow state enforcement Stop hook.
+	// When enabled, Claude is blocked from stopping until the workflow state file
+	// is created/updated. Requires /workflow skill to be installed.
+	// Default: false (nil = use default false, set true to enable)
+	WorkflowHookEnabled *bool `toml:"workflow_hook_enabled"`
 }
 
 // GetProfileClaudeConfigDir returns the profile-specific Claude config directory, if configured.
@@ -601,6 +607,14 @@ func (c *ClaudeSettings) GetHooksEnabled() bool {
 		return true
 	}
 	return *c.HooksEnabled
+}
+
+// GetWorkflowHookEnabled returns whether the workflow state Stop hook is enabled, defaulting to false
+func (c *ClaudeSettings) GetWorkflowHookEnabled() bool {
+	if c.WorkflowHookEnabled == nil {
+		return false
+	}
+	return *c.WorkflowHookEnabled
 }
 
 // GeminiSettings defines Gemini CLI configuration
