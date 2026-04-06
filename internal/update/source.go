@@ -166,6 +166,7 @@ func performSourceUpdate(settings session.UpdateSettings) error {
 	fmt.Println("Building from source...")
 
 	version, _ := sourceGitCmd(settings.SourceDir, "describe", "--tags", "--always", "--dirty")
+	version = strings.TrimPrefix(version, "v")
 	commit, _ := sourceGitCmd(settings.SourceDir, "rev-parse", "--short", "HEAD")
 	ldflags := fmt.Sprintf("-X main.Version=%s -X main.Commit=%s", version, commit)
 

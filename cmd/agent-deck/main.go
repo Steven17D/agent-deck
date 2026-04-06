@@ -95,6 +95,14 @@ func promptForUpdate() bool {
 	}
 
 	sourceRebuild, sourceHead := sourceRebuildNeeded()
+
+	// In source mode, sourceRebuildNeeded is the authoritative check (compares
+	// binary commit vs source_ref). info.Available compares the updater checkout's
+	// HEAD vs source_ref, which is a false positive when the binary was built from
+	// the workspace but the updater checkout hasn't been synced yet.
+	if settings.SourceDir != "" && !sourceRebuild {
+		return false
+	}
 	if !info.Available && !sourceRebuild {
 		return false
 	}
@@ -2203,7 +2211,12 @@ func handleUpdate(args []string) {
 		os.Exit(1)
 	}
 	sourceRebuild, sourceHead := sourceRebuildNeeded()
+	updateSettings := session.GetUpdateSettings()
 
+	if updateSettings.SourceDir != "" && !sourceRebuild {
+		fmt.Println("✓ You're running the latest version!")
+		return
+	}
 	if !info.Available && !sourceRebuild {
 		fmt.Println("✓ You're running the latest version!")
 		return
