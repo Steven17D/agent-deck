@@ -1136,12 +1136,13 @@ func handleSessionSetParent(profile string, args []string) {
 	jsonOutput := fs.Bool("json", false, "Output as JSON")
 	quiet := fs.Bool("quiet", false, "Minimal output")
 	quietShort := fs.Bool("q", false, "Minimal output (short)")
+	keepGroup := fs.Bool("keep-group", false, "Keep the session's current group instead of inheriting the parent's group")
 
 	fs.Usage = func() {
-		fmt.Println("Usage: agent-deck session set-parent <session> <parent>")
+		fmt.Println("Usage: agent-deck session set-parent <session> <parent> [options]")
 		fmt.Println()
 		fmt.Println("Link a session as a sub-session of another session.")
-		fmt.Println("The session will inherit the parent's group.")
+		fmt.Println("The session will inherit the parent's group unless --keep-group is specified.")
 		fmt.Println("This works for any session, including those created with --no-parent.")
 		fmt.Println()
 		fmt.Println("Options:")
@@ -1208,9 +1209,11 @@ func handleSessionSetParent(profile string, args []string) {
 		}
 	}
 
-	// Set parent (with project path for --add-dir access) and inherit group
+	// Set parent (with project path for --add-dir access)
 	inst.SetParentWithPath(parentInst.ID, parentInst.ProjectPath)
-	inst.GroupPath = parentInst.GroupPath
+	if !*keepGroup {
+		inst.GroupPath = parentInst.GroupPath
+	}
 
 	// Save
 	groupTree := session.NewGroupTreeWithGroups(instances, groupsData)
@@ -1226,6 +1229,7 @@ func handleSessionSetParent(profile string, args []string) {
 		"parent_id":       parentInst.ID,
 		"parent_title":    parentInst.Title,
 		"inherited_group": inst.GroupPath,
+		"kept_group":      *keepGroup,
 	})
 }
 

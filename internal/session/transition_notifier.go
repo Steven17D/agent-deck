@@ -144,32 +144,39 @@ func (n *TransitionNotifier) dispatch(event TransitionNotificationEvent) Transit
 		return event
 	}
 
-	parent := resolveParentNotificationTarget(child, byID)
-	if parent == nil {
-		event.DeliveryResult = transitionDeliveryDropped
-		return event
+	target := resolveParentNotificationTarget(child, byID)
+	targetKind := "parent"
+
+	// Fallback to a live conductor if no parent is set
+	if target == nil {
+		target = selectFallbackConductor(child, instances)
+		if target == nil {
+			event.DeliveryResult = transitionDeliveryDropped
+			return event
+		}
+		targetKind = "conductor"
 	}
 
 	// Defer delivery when the target session is busy (running) to avoid
 	// interrupting its in-progress response. The event will be retried on
 	// the next daemon poll cycle since deferred events are not marked as notified.
-	_ = parent.UpdateStatus()
-	if parent.GetStatusThreadSafe() == StatusRunning {
-		event.TargetSessionID = parent.ID
-		event.TargetKind = "parent"
+	_ = target.UpdateStatus()
+	if target.GetStatusThreadSafe() == StatusRunning {
+		event.TargetSessionID = target.ID
+		event.TargetKind = targetKind
 		event.DeliveryResult = transitionDeliveryDeferred
 		return event
 	}
 
-	if err := SendSessionMessageReliable(event.Profile, parent.ID, buildTransitionMessage(event)); err != nil {
-		event.TargetSessionID = parent.ID
-		event.TargetKind = "parent"
+	if err := SendSessionMessageReliable(event.Profile, target.ID, buildTransitionMessage(event)); err != nil {
+		event.TargetSessionID = target.ID
+		event.TargetKind = targetKind
 		event.DeliveryResult = transitionDeliveryFailed
 		return event
 	}
 
-	event.TargetSessionID = parent.ID
-	event.TargetKind = "parent"
+	event.TargetSessionID = target.ID
+	event.TargetKind = targetKind
 	event.DeliveryResult = transitionDeliverySent
 	return event
 }
@@ -207,6 +214,29 @@ func resolveParentNotificationTarget(child *Instance, byID map[string]*Instance)
 		}
 	}
 	return parent
+}
+
+// selectFallbackConductor finds a live conductor session to receive notifications
+// when the child has no parent set. Prefers conductors that match the child's profile.
+func selectFallbackConductor(child *Instance, instances []*Instance) *Instance {
+	var best *Instance
+	for _, inst := range instances {
+		if inst.ID == child.ID {
+			continue
+		}
+		if !isConductorSessionTitle(inst.Title) {
+			continue
+		}
+		_ = inst.UpdateStatus()
+		if !isLiveSessionStatus(inst.Status) {
+			continue
+		}
+		// Take the first live conductor we find
+		if best == nil {
+			best = inst
+		}
+	}
+	return best
 }
 
 func isLiveSessionStatus(status Status) bool {
