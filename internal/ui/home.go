@@ -1220,6 +1220,18 @@ func (h *Home) sessionHasWindows(item session.Item) bool {
 	return len(tmux.GetCachedWindows(tmuxSess.Name)) >= 2
 }
 
+// isChildOfSessionSelected returns true if the currently selected item is a sub-session of the given parent.
+func (h *Home) isChildOfSessionSelected(parentID string) bool {
+	if h.cursor >= len(h.flatItems) {
+		return false
+	}
+	sel := h.flatItems[h.cursor]
+	if sel.Session == nil {
+		return false
+	}
+	return sel.IsSubSession && sel.Session.ParentSessionID == parentID
+}
+
 // moveCursorToSession moves the cursor to the flat item matching the given session ID.
 func (h *Home) moveCursorToSession(sessionID string) {
 	for i, fi := range h.flatItems {
@@ -9573,6 +9585,15 @@ func (h *Home) renderSessionList(width, height int) string {
 
 	snapshot := h.getSessionRenderSnapshot()
 	groupStats := h.buildGroupRenderStats(snapshot)
+
+	// Precompute which session IDs have sub-sessions to avoid O(n²) scan in renderSessionItem.
+	hasSubSessions := make(map[string]bool)
+	for _, fi := range h.flatItems {
+		if fi.IsSubSession && fi.Session != nil && fi.Session.ParentSessionID != "" {
+			hasSubSessions[fi.Session.ParentSessionID] = true
+		}
+	}
+
 	var jumpHints []string
 	if h.jumpMode {
 		jumpHints = generateJumpHints(len(h.flatItems))
@@ -9583,7 +9604,7 @@ func (h *Home) renderSessionList(width, height int) string {
 		if h.jumpMode && i < len(jumpHints) {
 			// Render item to temp buffer, then overlay hint badge at name position
 			var itemBuf strings.Builder
-			h.renderItem(&itemBuf, item, i == h.cursor, i, groupStats, snapshot)
+			h.renderItem(&itemBuf, item, i == h.cursor, i, groupStats, snapshot, hasSubSessions)
 			raw := itemBuf.String()
 			hint := jumpHints[i]
 			isMatch := h.jumpBuffer == "" || strings.HasPrefix(hint, h.jumpBuffer)
@@ -9603,7 +9624,7 @@ func (h *Home) renderSessionList(width, height int) string {
 				b.WriteString(raw)
 			}
 		} else {
-			h.renderItem(&b, item, i == h.cursor, i, groupStats, snapshot)
+			h.renderItem(&b, item, i == h.cursor, i, groupStats, snapshot, hasSubSessions)
 		}
 		visibleCount++
 	}
@@ -9681,6 +9702,7 @@ func (h *Home) renderItem(
 	itemIndex int,
 	groupStats map[string]groupRenderStats,
 	snapshot map[string]sessionRenderState,
+	hasSubSessions map[string]bool,
 ) {
 	switch item.Type {
 	case session.ItemTypeGroup:
@@ -9689,7 +9711,7 @@ func (h *Home) renderItem(
 		if item.CreatingID != "" {
 			h.renderCreatingSessionItem(b, item, selected)
 		} else {
-			h.renderSessionItem(b, item, selected, snapshot)
+			h.renderSessionItem(b, item, selected, snapshot, hasSubSessions)
 		}
 	case session.ItemTypeWindow:
 		h.renderWindowItem(b, item, selected)
@@ -9872,6 +9894,7 @@ func (h *Home) renderSessionItem(
 	item session.Item,
 	selected bool,
 	snapshot map[string]sessionRenderState,
+	hasSubSessions map[string]bool,
 ) {
 	inst := item.Session
 
@@ -9910,8 +9933,9 @@ func (h *Home) renderSessionItem(
 	// Tree connector: └─ for last item, ├─ for others
 	treeConnector := treeBranch
 	if item.IsSubSession {
-		// Sub-session uses its own last-in-group logic
-		if item.IsLastSubSession {
+		// Sub-session rows should render an elbow when they are the final visible
+		// child. IsLastInGroup is a defensive fallback for stale sub-session flags.
+		if item.IsLastSubSession || item.IsLastInGroup {
 			treeConnector = subLast
 		} else {
 			treeConnector = subBranch
@@ -9959,6 +9983,13 @@ func (h *Home) renderSessionItem(
 		titleStyle = SessionTitleDefault
 	}
 
+	// Parent session: bright highlight when one of its children is selected
+	if !item.IsSubSession && hasSubSessions[inst.ID] {
+		if h.isChildOfSessionSelected(inst.ID) {
+			titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Reverse(true)
+		}
+	}
+
 	// Tool badge with brand-specific color
 	// Claude=orange, Gemini=purple, Codex=cyan, Aider=red
 	toolStyle := GetToolStyle(instTool)
@@ -9973,13 +10004,12 @@ func (h *Home) renderSessionItem(
 		status = statusStyle.Render(statusIcon)
 		// Tree connector also gets selection styling
 		treeStyle = TreeConnectorSelStyle
-		// Rebuild baseIndent with selection arrow for sub-sessions
-		// Replace the │ (or empty space) with ▶ so the arrow doesn't squeeze
-		// between tree connector characters (e.g. " │▶├─" → " ▶ ├─")
+		// Rebuild indent so selected sub-session rows render as "▶ ├─/└─"
+		// instead of squeezing the arrow between tree connectors.
 		if item.IsSubSession {
 			groupIndent := strings.Repeat(treeEmpty, max(0, item.Level-2))
-			baseIndent = groupIndent + SessionSelectionPrefix.Render(" ▶")
-			selectionPrefix = " "
+			baseIndent = groupIndent + SessionSelectionPrefix.Render("▶ ")
+			selectionPrefix = ""
 		}
 	}
 
@@ -10770,6 +10800,18 @@ func (h *Home) renderPreviewPane(width, height int) string {
 	b.WriteString(" ")
 	b.WriteString(groupBadge)
 	b.WriteString("\n")
+
+	// Parent session info
+	if selected.ParentSessionID != "" {
+		parentInst := h.getInstanceByID(selected.ParentSessionID)
+		if parentInst != nil {
+			parentStyle := lipgloss.NewStyle().Foreground(ColorPurple).Bold(true)
+			parentLabel := lipgloss.NewStyle().Foreground(ColorTextDim)
+			b.WriteString(parentLabel.Render("⬆ parent: "))
+			b.WriteString(parentStyle.Render(parentInst.Title))
+			b.WriteString("\n")
+		}
+	}
 
 	// Worktree info section (for sessions running in git worktrees)
 	if selected.IsWorktree() {
