@@ -33,6 +33,17 @@ import (
 
 var Version = "1.3.3" // overridden at build time via -ldflags "-X main.Version=..."
 
+// Commit is the git commit hash, injected at build time via ldflags.
+var Commit string
+
+// VersionString returns the version with commit hash if available.
+func VersionString() string {
+	if Commit != "" {
+		return Version + " (" + Commit + ")"
+	}
+	return Version
+}
+
 // Table column widths for list command output
 const (
 	tableColTitle     = 20
@@ -79,19 +90,40 @@ func promptForUpdate() bool {
 	}
 
 	info, err := update.CheckForUpdate(Version, false)
-	if err != nil || info == nil || !info.Available {
+	if err != nil || info == nil {
+		return false
+	}
+
+	sourceRebuild, sourceHead := sourceRebuildNeeded()
+
+	// In source mode, sourceRebuildNeeded is the authoritative check (compares
+	// binary commit vs source_ref). info.Available compares the updater checkout's
+	// HEAD vs source_ref, which is a false positive when the binary was built from
+	// the workspace but the updater checkout hasn't been synced yet.
+	if settings.SourceDir != "" && !sourceRebuild {
+		return false
+	}
+	if !info.Available && !sourceRebuild {
 		return false
 	}
 
 	// If auto_update is disabled, just show notification (don't prompt)
 	if !settings.AutoUpdate {
-		fmt.Fprintf(os.Stderr, "\n💡 Update available: v%s → v%s (run: agent-deck update)\n",
-			info.CurrentVersion, info.LatestVersion)
+		if sourceRebuild {
+			fmt.Fprintf(os.Stderr, "\n💡 Rebuild available: binary %s vs source %s (run: agent-deck update)\n", Commit, sourceHead)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n💡 Update available: v%s → v%s (run: agent-deck update)\n",
+				info.CurrentVersion, info.LatestVersion)
+		}
 		return false
 	}
 
 	// auto_update is enabled - prompt user
-	fmt.Printf("\n⬆ Update available: v%s → v%s\n", info.CurrentVersion, info.LatestVersion)
+	if sourceRebuild {
+		fmt.Printf("\n⬆ Rebuild available: binary %s vs source %s\n", Commit, sourceHead)
+	} else {
+		fmt.Printf("\n⬆ Update available: v%s → v%s\n", info.CurrentVersion, info.LatestVersion)
+	}
 	fmt.Print("Update now? [Y/n]: ")
 
 	var response string
@@ -198,7 +230,7 @@ func main() {
 	if len(args) > 0 {
 		switch args[0] {
 		case "version", "--version", "-v":
-			fmt.Printf("Agent Deck v%s\n", Version)
+			fmt.Printf("Agent Deck v%s\n", VersionString())
 			return
 		case "help", "--help", "-h":
 			printHelp()
@@ -313,6 +345,7 @@ func main() {
 
 	// Set version for UI update checking
 	ui.SetVersion(Version)
+	ui.SetCommit(Commit)
 
 	// Initialize theme from config (resolves "system" to actual dark/light)
 	theme := session.ResolveTheme()
@@ -2167,7 +2200,7 @@ func handleUpdate(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Agent Deck v%s\n", Version)
+	fmt.Printf("Agent Deck v%s\n", VersionString())
 	fmt.Println("Checking for updates...")
 
 	// Always force check when user explicitly runs 'update' command
@@ -2177,14 +2210,26 @@ func handleUpdate(args []string) {
 		fmt.Printf("Error checking for updates: %v\n", err)
 		os.Exit(1)
 	}
+	sourceRebuild, sourceHead := sourceRebuildNeeded()
+	updateSettings := session.GetUpdateSettings()
 
-	if !info.Available {
+	if updateSettings.SourceDir != "" && !sourceRebuild {
+		fmt.Println("✓ You're running the latest version!")
+		return
+	}
+	if !info.Available && !sourceRebuild {
 		fmt.Println("✓ You're running the latest version!")
 		return
 	}
 
-	fmt.Printf("\n⬆ Update available: v%s → v%s\n", info.CurrentVersion, info.LatestVersion)
-	fmt.Printf("  Release: %s\n", info.ReleaseURL)
+	if sourceRebuild && !info.Available {
+		fmt.Printf("\n⬆ Rebuild available: binary %s vs source %s\n", Commit, sourceHead)
+	} else {
+		fmt.Printf("\n⬆ Update available: v%s → v%s\n", info.CurrentVersion, info.LatestVersion)
+		if info.ReleaseURL != "" {
+			fmt.Printf("  %s\n", info.ReleaseURL)
+		}
+	}
 
 	// Fetch and display changelog
 	displayChangelog(info.CurrentVersion, info.LatestVersion)
@@ -2254,6 +2299,38 @@ func handleUpdate(args []string) {
 
 	// Offer to update remotes
 	updateRemotesAfterLocalUpdate(info.LatestVersion)
+}
+
+// sourceRebuildNeeded reports whether source-mode should rebuild the binary even
+// when the source checkout is not behind source_ref (e.g. binary commit differs).
+func sourceRebuildNeeded() (bool, string) {
+	settings := session.GetUpdateSettings()
+	if settings.SourceDir == "" || Commit == "" {
+		return false, ""
+	}
+
+	// Compare against the configured source ref (e.g. origin/dev), not HEAD.
+	// HEAD follows whatever branch the checkout is on, but the update mechanism
+	// builds from SourceRef. Comparing against HEAD causes false-positive
+	// rebuilds when the user is on a different branch.
+	ref := settings.SourceRef
+	if ref == "" {
+		ref = "HEAD"
+	}
+
+	cmd := exec.Command("git", "rev-parse", "--short", ref)
+	cmd.Dir = settings.SourceDir
+	out, err := cmd.Output()
+	if err != nil {
+		return false, ""
+	}
+
+	head := strings.TrimSpace(string(out))
+	if head == "" || head == Commit {
+		return false, head
+	}
+
+	return true, head
 }
 
 func runHomebrewUpgradeWithRefresh(homebrewUpgradeCmd string) error {
@@ -2327,7 +2404,7 @@ func drainStdin() {
 }
 
 func printHelp() {
-	fmt.Printf("Agent Deck v%s\n", Version)
+	fmt.Printf("Agent Deck v%s\n", VersionString())
 	fmt.Println("Terminal session manager for AI coding agents")
 	fmt.Println()
 	fmt.Println("Usage: agent-deck [-p profile] [-g group] [command]")
