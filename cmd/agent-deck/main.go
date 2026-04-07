@@ -264,6 +264,9 @@ func main() {
 		case "costs":
 			handleCosts(profile, args[1:])
 			return
+		case "workflow":
+			handleWorkflow(profile, args[1:])
+			return
 		case "web":
 			webEnabled = true
 			webArgs = append(webArgs, args[1:]...)
